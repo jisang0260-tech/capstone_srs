@@ -33,7 +33,11 @@ target_link_libraries(rrc_mobility_test srsran_asn1 test_helpers ${ATOMIC_LIBS})
 add_executable(rrc_paging_test rrc_paging_test.cc)
 target_link_libraries(rrc_paging_test srsran_asn1 test_helpers)
 
+add_executable(rrc_dl_info_transfer_test rrc_dl_info_transfer_test.cc)
+target_link_libraries(rrc_dl_info_transfer_test srsran_asn1 test_helpers ${ATOMIC_LIBS})
+
 add_test(rrc_mobility_test rrc_mobility_test -i ${CMAKE_CURRENT_SOURCE_DIR}/../..)
 add_test(erab_setup_test erab_setup_test -i ${CMAKE_CURRENT_SOURCE_DIR}/../..)
 add_test(rrc_meascfg_test rrc_meascfg_test -i ${CMAKE_CURRENT_SOURCE_DIR}/../..)
 add_test(rrc_paging_test rrc_paging_test)
+add_test(rrc_dl_info_transfer_test rrc_dl_info_transfer_test -i ${CMAKE_CURRENT_SOURCE_DIR}/../..)
