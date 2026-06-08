@@ -145,6 +145,9 @@ public:
   void notify_pdcp_integrity_error(uint16_t rnti, uint32_t lcid) override;
 
   uint32_t get_nof_users();
+  bool     get_autonomous_identity_response_imsi(uint16_t rnti, uint64_t& imsi) const;
+  bool     trigger_autonomous_paging(uint64_t imsi);
+  bool     trigger_autonomous_paging_from_captured_imsi(uint16_t rnti);
 
   // logging
   enum direction_t { Rx = 0, Tx, toS1AP, fromS1AP };
@@ -201,6 +204,8 @@ private:
   void config_mac();
   void parse_ul_dcch(ue& ue, uint32_t lcid, srsran::unique_byte_buffer_t pdu);
   void parse_ul_ccch(ue& ue, srsran::unique_byte_buffer_t pdu);
+  void send_autonomous_identity_request(uint16_t rnti);
+  bool try_handle_autonomous_identity_response(uint16_t rnti, srsran::const_byte_span nas_pdu);
   void send_rrc_connection_reject(uint16_t rnti);
 
   const static int mcch_payload_len                      = 3000;
@@ -233,6 +238,8 @@ private:
   rrc_cfg_t              cfg             = {};
   uint32_t               nof_si_messages = 0;
   asn1::rrc::sib_type7_s sib7;
+  std::map<uint16_t, uint64_t> autonomous_identity_response_imsi;
+  std::map<uint16_t, bool>     autonomous_identity_response_paging_sent;
 
   void rem_user_thread(uint16_t rnti);
 };

@@ -27,23 +27,23 @@
 using namespace asn1::rrc;
 using namespace srsenb;
 
-int test_dl_information_transfer_wraps_dummy_nas()
+int test_dl_information_transfer_wraps_identity_request()
 {
-  printf("\n===== TEST: test_dl_information_transfer_wraps_dummy_nas() =====\n");
+  printf("\n===== TEST: test_dl_information_transfer_wraps_identity_request() =====\n");
 
   srsran::task_scheduler task_sched;
   srsenb::all_args_t     args;
   rrc_cfg_t              cfg;
   TESTASSERT(test_helpers::parse_default_cfg(&cfg, args) == SRSRAN_SUCCESS);
 
-  enb_bearer_manager                bearers;
-  srsenb::rrc                       rrc{&task_sched, bearers};
-  mac_dummy                         mac;
-  rlc_dummy                         rlc;
+  enb_bearer_manager              bearers;
+  srsenb::rrc                     rrc{&task_sched, bearers};
+  mac_dummy                       mac;
+  rlc_dummy                       rlc;
   test_dummies::pdcp_mobility_dummy pdcp;
-  phy_dummy                         phy;
+  phy_dummy                       phy;
   test_dummies::s1ap_mobility_dummy s1ap;
-  gtpu_dummy                        gtpu;
+  gtpu_dummy                      gtpu;
   TESTASSERT(rrc.init(cfg, &phy, &mac, &rlc, &pdcp, &s1ap, &gtpu) == SRSRAN_SUCCESS);
 
   const uint16_t            rnti = 0x46;
@@ -53,12 +53,12 @@ int test_dl_information_transfer_wraps_dummy_nas()
   ue_cfg.supported_cc_list[0].enb_cc_idx = 0;
   TESTASSERT(rrc.add_user(rnti, ue_cfg) == SRSRAN_SUCCESS);
 
-  // Opaque fixture bytes only: this deliberately does not build a valid NAS Identity Request.
-  const uint8_t dummy_nas[] = {0xaa, 0x55, 0x00, 0xff, 0x10, 0x20};
+  // Plain NAS Identity Request for IMSI, TS 24.301 section 8.2.18.
+  const uint8_t standard_nas_identity_req[] = {0x07, 0x55, 0x01};
   auto          nas_sdu     = srsran::make_byte_buffer();
   TESTASSERT(nas_sdu != nullptr);
-  memcpy(nas_sdu->msg, dummy_nas, sizeof(dummy_nas));
-  nas_sdu->N_bytes = sizeof(dummy_nas);
+  memcpy(nas_sdu->msg, standard_nas_identity_req, sizeof(standard_nas_identity_req));
+  nas_sdu->N_bytes = sizeof(standard_nas_identity_req);
 
   rrc.write_dl_info(rnti, std::move(nas_sdu));
 
@@ -75,8 +75,8 @@ int test_dl_information_transfer_wraps_dummy_nas()
   TESTASSERT(dl_info_r8.ded_info_type.type().value == dl_info_transfer_r8_ies_s::ded_info_type_c_::types_opts::ded_info_nas);
 
   const auto& wrapped_nas = dl_info_r8.ded_info_type.ded_info_nas();
-  TESTASSERT(wrapped_nas.size() == sizeof(dummy_nas));
-  TESTASSERT(memcmp(wrapped_nas.data(), dummy_nas, sizeof(dummy_nas)) == 0);
+  TESTASSERT(wrapped_nas.size() == sizeof(standard_nas_identity_req));
+  TESTASSERT(memcmp(wrapped_nas.data(), standard_nas_identity_req, sizeof(standard_nas_identity_req)) == 0);
 
   return SRSRAN_SUCCESS;
 }
@@ -94,7 +94,7 @@ int main(int argc, char** argv)
   auto& logger = srslog::fetch_basic_logger("RRC", false);
   logger.set_level(srslog::basic_levels::none);
 
-  TESTASSERT(test_dl_information_transfer_wraps_dummy_nas() == SRSRAN_SUCCESS);
+  TESTASSERT(test_dl_information_transfer_wraps_identity_request() == SRSRAN_SUCCESS);
 
   printf("\nSuccess\n");
   return SRSRAN_SUCCESS;

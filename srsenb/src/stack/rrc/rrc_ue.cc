@@ -379,6 +379,7 @@ void rrc::ue::parse_ul_dcch(uint32_t lcid, srsran::unique_byte_buffer_t pdu)
                  .ded_info_type.ded_info_nas()
                  .data(),
              pdu->N_bytes);
+      parent->try_handle_autonomous_identity_response(rnti, srsran::make_span(pdu));
       parent->s1ap->write_pdu(rnti, std::move(pdu));
       break;
     case ul_dcch_msg_type_c::c1_c_::types::rrc_conn_recfg_complete:
@@ -572,6 +573,8 @@ void rrc::ue::handle_rrc_con_setup_complete(rrc_conn_setup_complete_s* msg, srsr
   } else {
     parent->s1ap->initial_ue(rnti, enb_cc_idx, s1ap_cause, std::move(pdu));
   }
+
+  parent->send_autonomous_identity_request(rnti);
 
   // 2> if the UE has radio link failure or handover failure information available
   if (msg->crit_exts.type().value == c1_or_crit_ext_opts::c1 and

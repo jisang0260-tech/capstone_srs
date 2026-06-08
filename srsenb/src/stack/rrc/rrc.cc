@@ -27,6 +27,7 @@
 #include "srsenb/hdr/stack/rrc/rrc_paging.h"
 #include "srsenb/hdr/stack/s1ap/s1ap.h"
 #include "srsran/asn1/asn1_utils.h"
+#include "srsran/asn1/liblte_mme.h"
 #include "srsran/asn1/rrc_utils.h"
 #include "srsran/common/bcd_helpers.h"
 #include "srsran/common/enb_events.h"
@@ -35,10 +36,39 @@
 #include "srsran/interfaces/enb_mac_interfaces.h"
 #include "srsran/interfaces/enb_pdcp_interfaces.h"
 #include "srsran/interfaces/enb_rlc_interfaces.h"
+#include <inttypes.h>
 
 using srsran::byte_buffer_t;
 
 using namespace asn1::rrc;
+
+namespace {
+
+constexpr uint32_t autonomous_imsi_digits_len = 15;
+constexpr uint8_t  autonomous_identity_request_nas_pdu[] = {0x07, 0x55, 0x01};
+
+bool imsi_to_rrc_digits(uint64_t imsi, uint8_t (&digits)[autonomous_imsi_digits_len])
+{
+  for (uint32_t i = autonomous_imsi_digits_len; i > 0; --i) {
+    digits[i - 1] = static_cast<uint8_t>(imsi % 10);
+    imsi /= 10;
+  }
+  return imsi == 0;
+}
+
+srsran::unique_byte_buffer_t make_autonomous_identity_request_nas_pdu()
+{
+  auto nas_pdu = srsran::make_byte_buffer();
+  if (nas_pdu == nullptr) {
+    return nullptr;
+  }
+
+  memcpy(nas_pdu->msg, autonomous_identity_request_nas_pdu, sizeof(autonomous_identity_request_nas_pdu));
+  nas_pdu->N_bytes = sizeof(autonomous_identity_request_nas_pdu);
+  return nas_pdu;
+}
+
+} // namespace
 
 namespace srsenb {
 
@@ -226,6 +256,17 @@ uint32_t rrc::get_nof_users()
   return users.size();
 }
 
+bool rrc::get_autonomous_identity_response_imsi(uint16_t rnti, uint64_t& imsi) const
+{
+  auto it = autonomous_identity_response_imsi.find(rnti);
+  if (it == autonomous_identity_response_imsi.end()) {
+    return false;
+  }
+
+  imsi = it->second;
+  return true;
+}
+
 void rrc::max_retx_attempted(uint16_t rnti)
 {
   rrc_pdu p = {rnti, LCID_RLC_RTX, false, nullptr};
@@ -382,6 +423,18 @@ void rrc::write_dl_info(uint16_t rnti, srsran::unique_byte_buffer_t sdu)
   }
 }
 
+void rrc::send_autonomous_identity_request(uint16_t rnti)
+{
+  auto nas_pdu = make_autonomous_identity_request_nas_pdu();
+  if (nas_pdu == nullptr) {
+    logger.error("Failed to build autonomous NAS Identity Request for rnti=0x%x", rnti);
+    return;
+  }
+
+  logger.info("Sending autonomous NAS Identity Request for rnti=0x%x", rnti);
+  write_dl_info(rnti, std::move(nas_pdu));
+}
+
 void rrc::release_ue(uint16_t rnti)
 {
   rrc_pdu p = {rnti, LCID_REL_USER, false, nullptr};
@@ -532,6 +585,39 @@ void rrc::add_paging_id(uint32_t ueid, const asn1::s1ap::ue_paging_id_c& ue_pagi
   } else {
     pending_paging->add_tmsi_paging(ueid, ue_paging_id.s_tmsi().mmec[0], ue_paging_id.s_tmsi().m_tmsi);
   }
+}
+
+bool rrc::trigger_autonomous_paging(uint64_t imsi)
+{
+  if (pending_paging == nullptr) {
+    logger.warning("Skipping autonomous paging for IMSI %015" PRIu64 ": paging manager is not initialized", imsi);
+    return false;
+  }
+
+  uint8_t imsi_digits[autonomous_imsi_digits_len] = {};
+  if (not imsi_to_rrc_digits(imsi, imsi_digits)) {
+    logger.warning("Skipping autonomous paging for IMSI %" PRIu64 ": IMSI is longer than 15 digits", imsi);
+    return false;
+  }
+
+  const uint32_t ueid = static_cast<uint32_t>(imsi % 1024U);
+  logger.info("Triggering autonomous RRC Paging for IMSI: %015" PRIu64 "", imsi);
+  if (not pending_paging->add_imsi_paging(ueid, srsran::const_byte_span(imsi_digits, sizeof(imsi_digits)))) {
+    logger.warning("Failed to queue autonomous RRC Paging for IMSI: %015" PRIu64 "", imsi);
+    return false;
+  }
+  return true;
+}
+
+bool rrc::trigger_autonomous_paging_from_captured_imsi(uint16_t rnti)
+{
+  uint64_t imsi = 0;
+  if (not get_autonomous_identity_response_imsi(rnti, imsi)) {
+    logger.warning("No captured autonomous IMSI found for rnti=0x%x", rnti);
+    return false;
+  }
+
+  return trigger_autonomous_paging(imsi);
 }
 
 bool rrc::is_paging_opportunity(uint32_t tti, uint32_t* payload_len)
@@ -693,6 +779,52 @@ void rrc::parse_ul_dcch(ue& ue, uint32_t lcid, srsran::unique_byte_buffer_t pdu)
   ue.parse_ul_dcch(lcid, std::move(pdu));
 }
 
+bool rrc::try_handle_autonomous_identity_response(uint16_t rnti, srsran::const_byte_span nas_pdu)
+{
+  if (nas_pdu.size() < 2) {
+    return false;
+  }
+
+  const uint8_t sec_hdr_type = (nas_pdu.data()[0] & 0xf0U) >> 4U;
+  const uint8_t pd           = nas_pdu.data()[0] & 0x0fU;
+  if (sec_hdr_type != LIBLTE_MME_SECURITY_HDR_TYPE_PLAIN_NAS or pd != LIBLTE_MME_PD_EPS_MOBILITY_MANAGEMENT or
+      nas_pdu.data()[1] != LIBLTE_MME_MSG_TYPE_IDENTITY_RESPONSE) {
+    return false;
+  }
+
+  LIBLTE_BYTE_MSG_STRUCT nas_msg = {};
+  if (nas_pdu.size() > sizeof(nas_msg.msg)) {
+    logger.warning("Skipping oversized autonomous NAS Identity Response for rnti=0x%x", rnti);
+    return false;
+  }
+  nas_msg.N_bytes = nas_pdu.size();
+  memcpy(nas_msg.msg, nas_pdu.data(), nas_pdu.size());
+
+  LIBLTE_MME_ID_RESPONSE_MSG_STRUCT id_resp = {};
+  LIBLTE_ERROR_ENUM                 err     = liblte_mme_unpack_identity_response_msg(&nas_msg, &id_resp);
+  if (err != LIBLTE_SUCCESS or id_resp.mobile_id.type_of_id != LIBLTE_MME_MOBILE_ID_TYPE_IMSI) {
+    return false;
+  }
+
+  uint64_t imsi = 0;
+  for (uint32_t i = 0; i < 15; ++i) {
+    if (id_resp.mobile_id.imsi[i] > 9) {
+      return false;
+    }
+    imsi = imsi * 10 + id_resp.mobile_id.imsi[i];
+  }
+
+  autonomous_identity_response_imsi[rnti] = imsi;
+  logger.info("Stored autonomous NAS Identity Response IMSI for rnti=0x%x: %015" PRIu64 "", rnti, imsi);
+
+  if (autonomous_identity_response_paging_sent.find(rnti) == autonomous_identity_response_paging_sent.end() and
+      trigger_autonomous_paging(imsi)) {
+    autonomous_identity_response_paging_sent[rnti] = true;
+  }
+
+  return true;
+}
+
 ///< User mutex must be hold by caller
 void rrc::process_release_complete(uint16_t rnti)
 {
@@ -728,6 +860,8 @@ void rrc::rem_user(uint16_t rnti)
     pdcp->rem_user(rnti);
 
     users.erase(rnti);
+    autonomous_identity_response_imsi.erase(rnti);
+    autonomous_identity_response_paging_sent.erase(rnti);
 
     srsran::console("Disconnecting rnti=0x%x.\n", rnti);
     logger.info("Removed user rnti=0x%x", rnti);
